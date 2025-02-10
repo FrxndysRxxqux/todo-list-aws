@@ -22,7 +22,7 @@ Globals:
     Timeout: 3
     Environment:
       Variables:
-        DYNAMODB_TABLE: !Ref TodosDynamoDbTable
+        DYNAMODB_TABLE: !Ref TodosDynamoDbTable-production
         ENDPOINT_OVERRIDE: ""
     
 Resources:

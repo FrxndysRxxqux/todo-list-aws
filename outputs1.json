@@ -1,0 +1,32 @@
+[
+    {
+        "OutputKey": "BaseUrlApi",
+        "OutputValue": "https://p3izkkm7yg.execute-api.us-east-1.amazonaws.com/Prod",
+        "Description": "Base URL of API"
+    },
+    {
+        "OutputKey": "DeleteTodoApi",
+        "OutputValue": "https://p3izkkm7yg.execute-api.us-east-1.amazonaws.com/Prod/todos/{id}",
+        "Description": "API Gateway endpoint URL for ${opt:stage} stage for Delete TODO"
+    },
+    {
+        "OutputKey": "ListTodosApi",
+        "OutputValue": "https://p3izkkm7yg.execute-api.us-east-1.amazonaws.com/Prod/todos",
+        "Description": "API Gateway endpoint URL for ${opt:stage} stage for List TODO"
+    },
+    {
+        "OutputKey": "UpdateTodoApi",
+        "OutputValue": "https://p3izkkm7yg.execute-api.us-east-1.amazonaws.com/Prod/todos/{id}",
+        "Description": "API Gateway endpoint URL for ${opt:stage} stage for Update TODO"
+    },
+    {
+        "OutputKey": "GetTodoApi",
+        "OutputValue": "https://p3izkkm7yg.execute-api.us-east-1.amazonaws.com/Prod/todos/{id}",
+        "Description": "API Gateway endpoint URL for ${opt:stage} stage for Get TODO"
+    },
+    {
+        "OutputKey": "CreateTodoApi",
+        "OutputValue": "https://p3izkkm7yg.execute-api.us-east-1.amazonaws.com/Prod/todos/",
+        "Description": "API Gateway endpoint URL for ${opt:stage} stage for Create TODO"
+    }
+]

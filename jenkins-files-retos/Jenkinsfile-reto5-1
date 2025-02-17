@@ -1,0 +1,219 @@
+pipeline {
+    agent any
+    environment {
+        GIT_CREDENTIALS = 'git-credentials' //  ID de las credenciales configuradas
+        GIT_URL = 'todo-list-aws.git' //nombre repositorio git para url
+    }
+    stages {
+        stage('CI - GetCode') {
+            steps {
+                git credentialsId: 'git-credentials', // id de la credencial en jenkins
+                branch:'develop',
+                url:'https://github.com/FrxndysRxxqux/todo-list-aws.git'
+                
+                sh """ 
+                    echo "Mostrando informacion local..."
+                    whoami
+                    hostname 
+                    
+                    echo "Descargando samconfig.toml del repositorio publico donde se encuentra la configuracion..."
+                    curl -o samconfig.toml -L "https://raw.githubusercontent.com/FrxndysRxxqux/todo-list-aws-config/stagin/samconfig.toml"
+                    ls -la
+                """
+                
+            }
+        }
+        
+        stage('CI - Static test'){
+            parallel{
+                stage('CI - Flake8'){
+                    steps{
+                        catchError(buildResult:'UNSTABLE',stageResult:'FAILURE'){
+                            sh ''' 
+                                echo "Mostrando informacion local..."
+                                    whoami
+                                    hostname 
+                                pip install flake8 
+                                python3 -m flake8 --exit-zero --ignore=F401,E265,W293,E225,E226,E121,E211,E501,E301,W292 --max-line-length=110 --format=pylint test/integration/todoApiTest.py
+                            '''
+                        }
+                    }
+                }
+                stage('CI - Bandit'){
+                    steps{
+                        sh '''
+                            echo "Mostrando informacion local..."
+                                whoami
+                                hostname 
+                            pip install bandit
+                            python3 -m bandit --exit-zero -r . -f custom -o bandit.out --msg-template "{abspath}:{line}:{severity}:{test_id}:{msg}"
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('CI - Sam Deploy'){
+            steps {
+                script{
+                    
+                    //obtenemos los varoes del deploy desde el archivo que nos hemos descargado del repositorio "todo-list-aws-config"
+                    def stack_name = sh(script: "awk -F ' = \"' '/stack_name/ {print \$2}' samconfig.toml | tr -d '\"'", returnStdout: true).trim();
+                    def region = sh(script: "awk -F ' = \"' '/region/ {print \$2}' samconfig.toml | tr -d '\"'", returnStdout: true).trim();
+                    def s3_prefix = sh(script: "awk -F ' = \"' '/s3_prefix/ {print \$2}' samconfig.toml | tr -d '\"'", returnStdout: true).trim();
+                    def capabilities = sh(script: "awk -F ' = \"' '/capabilities/ {print \$2}' samconfig.toml | tr -d '\"'", returnStdout: true).trim();
+                    def stage = 'staging' // Cambiar según el entorno
+
+                    sh """
+                        echo "Mostrando informacion local..."
+                            whoami
+                            hostname 
+                    
+                        # Ejecutar el comando sam build
+                        sam build
+
+                        # Permitir que sam deploy falle sin interrumpir el pipeline
+                        
+                        sam deploy --stack-name ${stack_name} \
+                           --region ${region}  \
+                           --s3-prefix ${s3_prefix} \
+                           --no-confirm-changeset \
+                           --no-fail-on-empty-changeset \
+                           --capabilities ${capabilities} \
+                           --resolve-s3 \
+                           --parameter-overrides Stage=${stage} \
+
+                        # Usar cada valor del array como parámetro
+                        aws cloudformation describe-stacks --stack-name ${stack_name} --query 'Stacks[0].Outputs' --output json > ${stack_name}-outputs.json
+                    """
+                }
+            }
+        }
+        
+        stage('CI - Test Rest') {
+            steps {
+                script {
+                    def stack_name = sh(script: "awk -F ' = \"' '/stack_name/ {print \$2}' samconfig.toml | tr -d '\"'", returnStdout: true).trim()
+                
+                    sh """
+                        echo "Mostrando informacion local..."
+                        whoami
+                        hostname 
+                        
+                        # sudo apt install jq -y #herramienta de línea de comandos para procesar JSON en Linux
+                    
+                        ListTodosApi=\$(jq -r '.[] | select(.OutputKey=="ListTodosApi") | .OutputValue' ${stack_name}-outputs.json)
+                        CreateTodoApi=\$(jq -r '.[] | select(.OutputKey=="CreateTodoApi") | .OutputValue' ${stack_name}-outputs.json)
+                        GetTodoApi=\$(jq -r '.[] | select(.OutputKey=="GetTodoApi") | .OutputValue' ${stack_name}-outputs.json)
+                        UpdateTodoApi=\$(jq -r '.[] | select(.OutputKey=="UpdateTodoApi") | .OutputValue' ${stack_name}-outputs.json)
+                        DeleteTodoApi=\$(jq -r '.[] | select(.OutputKey=="DeleteTodoApi") | .OutputValue' ${stack_name}-outputs.json)
+                        
+                        echo "Validando LIST TODO API..."
+                        RESPONSE=\$(curl -s "\${ListTodosApi}" -w "\n%{http_code}")
+                        HTTP_CODE=\$(echo "\${RESPONSE}" | tail -n1)
+                        JSON_RESPONSE=\$(echo "\${RESPONSE}" | sed '\$d')
+                        
+                        if [ "\${HTTP_CODE}" -ne 200 ]; then
+                            echo "ERROR: LIST TODO API fallo con codigo \${HTTP_CODE}"
+                            echo "Respuesta completa: \${JSON_RESPONSE}"
+                            exit 1
+                        fi
+                        
+                        echo "Validando CREATE TODO API..."
+                        RESPONSE=\$(curl -s -X POST -d '{"text": "Learning CD"}' "\${CreateTodoApi}" -w "\n%{http_code}")
+                        HTTP_CODE=\$(echo "\${RESPONSE}" | tail -n1)
+                        JSON_RESPONSE=\$(echo "\${RESPONSE}" | sed '\$d')
+                        
+                        if [ "\${HTTP_CODE}" -ne 200 ]; then
+                            echo "ERROR: CREATE TODO API fallo \${RESPONSE}"
+                            exit 1
+                        fi
+                        
+                        #almacenar id para el get/id
+                        TODO_ID=\$(echo "\${JSON_RESPONSE}" | jq -r '.body | fromjson | .id')
+                        
+                        echo "Validando GET TODO API..."
+                        RESPONSE=\$(curl -s -w "%{http_code}" "\$(echo "\${GetTodoApi}" | sed "s/{id}/\${TODO_ID}/")")
+                        
+                        if [ "\${RESPONSE}" -ne 200 ]; then
+                            echo "ERROR: GET TODO API fallo \${RESPONSE}"
+                            exit 1
+                        fi
+                    
+                        echo "Validando UPDATE TODO API..."
+                        RESPONSE=\$(curl -X PUT \$(echo "\${UpdateTodoApi}" | sed "s/{id}/\${TODO_ID}/") --data '{"text": "Learning CI/CD","checked": true}'  -w "\n%{http_code}")
+                        HTTP_CODE=\$(echo "\${RESPONSE}" | tail -n1)
+                        JSON_RESPONSE=\$(echo "\${RESPONSE}" | sed '\$d')
+                        
+                        echo "Respuesta: \${JSON_RESPONSE}"
+                    
+                        # Verificar si la solicitud fue exitosa
+                        if [ "\${HTTP_CODE}" -ne 200 ]; then
+                            echo "ERROR: UPDATE TODO API fallo \${RESPONSE}"
+                            exit 1
+                        fi
+                        
+                        echo "Validando DELETE TODO API..."
+                        
+                        RESPONSE=\$(curl -X DELETE \$(echo "\${DeleteTodoApi}" | sed "s/{id}/\${TODO_ID}/")  -w "\n%{http_code}")
+                        HTTP_CODE=\$(echo "\${RESPONSE}" | tail -n1)
+                        JSON_RESPONSE=\$(echo "\${RESPONSE}" | sed '\$d')
+                        
+                        echo "Respuesta: \${JSON_RESPONSE}"
+                    
+                        if [ "\${HTTP_CODE}" -ne 200 ]; then
+                            echo "ERROR: DELETE TODO API fallo con codigo \${RESPONSE}"
+                            exit 1
+                        fi
+                    """
+                }
+            }
+        }
+     
+        stage('CI - Promote'){
+            steps{
+                script {
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        withCredentials([usernamePassword(credentialsId: 'git-credentials', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                            def encodedPassword = URLEncoder.encode("$GIT_PASSWORD",'UTF-8')
+                            def stack_name = sh(script: "awk -F ' = \"' '/stack_name/ {print \$2}' samconfig.toml | tr -d '\"'", returnStdout: true).trim()
+
+                            sh """
+                            echo "Mostrando informacion local..."
+                                whoami
+                                hostname 
+                            """
+                            sh "git config user.email froquetrinidad@gmail.com"
+                            sh "git config user.name Frandys Roque"
+                            sh "git status"
+                            sh "git add -A"
+                            sh "git reset bandit.out ${stack_name}-outputs.json" //ignoramos archivos creados que no son neceasrios en prod
+                            // sh 'git commit --no-verify -m "CI COMPLETED" ' 
+                            sh 'git commit -m "${stack_name} auto commit" ' 
+                            sh "git status"
+
+                            // Asegurarse de que tu rama 'master' esté actualizada con los cambios remotos
+                            sh "git fetch origin master"  
+                            sh "git checkout master"  
+                            sh "git reset --hard origin/master"  // Alinea tu rama 'master' local con la remota, descartando cambios locales
+
+                            //sh 'git merge develop -m "Promoting changes from develop to master"'
+                            sh 'git merge -X theirs develop -m "Promoting changes from develop to master"'
+
+                            sh "git push https://${GIT_USERNAME}:${encodedPassword}@github.com/${GIT_USERNAME}/${GIT_URL}"
+                        }
+                    }
+                }
+            }   
+        }
+        
+        stage('Cleanup') {
+            steps {
+                echo 'Cleaning up the workspace to start CD stages...'
+                deleteDir()  // Esta función eliminará todo el contenido del workspace
+                sh "ls -la"
+            }
+        }
+        
+    }
+}

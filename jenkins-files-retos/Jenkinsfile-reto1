@@ -1,0 +1,174 @@
+pipeline {
+    agent any
+    environment {
+        BUCKET_S3 = "aws-sam-cli-managed-default-samclisourcebucket-fgsqnqdi6l9l"
+        GIT_CREDENTIALS = 'git-credentials' //  ID de las credenciales configuradas
+        GIT_URL = 'todo-list-aws.git' //nombre repositorio git para url
+    }
+    stages {
+        stage('GetCode') {
+            steps {
+                git credentialsId: 'git-credentials', // id de la credencial en jenkins
+                branch:'develop',
+                url:'https://github.com/FrxndysRxxqux/todo-list-aws.git'
+            }
+        }
+        stage('Static test'){
+            parallel{
+                stage('Flake8'){
+                    steps{
+                            sh '''
+                                pip install flake8
+                                python3 -m flake8 --exit-zero  --format=pylint src > flake8.out
+                               
+                            '''
+                    }
+                }
+                stage('Bandit'){
+                    steps{
+                        sh '''
+                            pip install bandit
+                            python3 -m bandit --exit-zero -r . -f custom -o bandit.out --msg-template "{abspath}:{line}:{severity}:{test_id}:{msg}"
+                            
+                        '''
+                    }
+                }
+            }
+        }
+        stage('Sam Deploy'){
+            steps {
+                script{
+                    sh """
+                        # Ejecutar el comando sam build
+                        sam build
+
+                        # Modificar samconfig.toml
+                        sed -i 's/resolve_s3 = true/resolve_s3 = false/' samconfig.toml
+                    
+                        # Permitir que sam deploy falle sin interrumpir el pipeline
+                        set +e
+                        sam deploy --stack-name todo-list-aws \
+                                   --region us-east-1 \
+                                   --s3-bucket $BUCKET_S3 \
+                                   --s3-prefix todo-list-aws \
+                                   --no-confirm-changeset
+                        set -e
+
+                        # Usar cada valor del array como parámetro
+                        aws cloudformation describe-stacks --stack-name "todo-list-aws" --query 'Stacks[0].Outputs' --output json > outputs1.json
+                    """
+                }
+              
+               
+            }
+            
+            
+        }
+        stage('Test Rest') {
+            steps {
+                script{
+                    
+                    // Exportarlas como variables de entorno
+                    env.ListTodosApi = "https://hzwlga2fu2.execute-api.us-east-1.amazonaws.com/Prod/todos"
+                    env.CreateTodoApi = "https://hzwlga2fu2.execute-api.us-east-1.amazonaws.com/Prod/todos/"
+                    env.GetTodoApi = "https://hzwlga2fu2.execute-api.us-east-1.amazonaws.com/Prod/todos/{id}"
+                    env.UpdateTodoApi = "https://hzwlga2fu2.execute-api.us-east-1.amazonaws.com/Prod/todos/{id}"
+                    env.DeleteTodoApi = "https://hzwlga2fu2.execute-api.us-east-1.amazonaws.com/Prod/todos/{id}"
+
+                    sh '''
+                        echo "Validando LIST TODO API..."
+                            RESPONSE=$(curl -s "$ListTodosApi" -w "\n%{http_code}")
+                            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                            JSON_RESPONSE=$(echo "$RESPONSE" | sed '$d')
+                            
+                            if [ "$HTTP_CODE" -ne 200 ]; then
+                                echo "ERROR: LIST TODO API fallo con codigo $HTTP_CODE"
+                                echo "Respuesta completa: $JSON_RESPONSE"
+                                exit 1
+                            fi
+                            
+                            
+                        echo "Validando CREATE TODO API..."
+                            RESPONSE=$(curl -s -X POST -d '{"text": "Learning CD"}' "$CreateTodoApi" -w "\n%{http_code}")
+                            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                            JSON_RESPONSE=$(echo "$RESPONSE" | sed '$d')
+                            
+                            if [ "$HTTP_CODE" -ne 200 ]; then
+                                echo "ERROR: LIST TODO API fallo $RESPONSE"
+                                exit 1
+                            fi
+                            
+                            #almacenar id para el get/id
+                            TODO_ID=$(echo "$JSON_RESPONSE" | jq -r '.body | fromjson | .id')
+                            
+                        echo "Validando GET TODO API..."
+                            # RESPONSE=$(curl -s -w "%{http_code}" "$GetTodoApi")
+                            RESPONSE=$(curl -s -w "%{http_code}" "$(echo "$GetTodoApi" | sed "s/{id}/$TODO_ID/")")
+                            
+                            if [ "$RESPONSE" -ne 200 ]; then
+                                echo "ERROR: GET TODO API fallo $RESPONSE"
+                                exit 1
+                            fi
+                        
+                        echo "Validando UPDATE TODO API..."
+                            RESPONSE=$(curl -X PUT $(echo "$UpdateTodoApi" | sed "s/{id}/$TODO_ID/") --data '{"text": "Learning CI/CD","checked": true}'  -w "\n%{http_code}")
+                            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                            JSON_RESPONSE=$(echo "$RESPONSE" | sed '$d')
+                            
+                            echo "Respuesta: $JSON_RESPONSE"
+    
+                            # Verificar si la solicitud fue exitosa
+                            if [ "$HTTP_CODE" -ne 200 ]; then
+                                echo "ERROR: UPDATE TODO API fallo $RESPONSE"
+                                exit 1
+                            fi
+                            
+                        echo "Validando DELETE TODO API..."
+                        
+                            RESPONSE=$(curl -X DELETE $(echo "$DeleteTodoApi" | sed "s/{id}/$TODO_ID/")  -w "\n%{http_code}")
+                            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                            JSON_RESPONSE=$(echo "$RESPONSE" | sed '$d')
+                            
+                            echo "Respuesta: $JSON_RESPONSE"
+    
+                            if [ "$HTTP_CODE" -ne 200 ]; then
+                                echo "ERROR: DELETE TODO API fallo con codigo $RESPONSE"
+                                exit 1
+                            fi
+                    '''
+                }
+                
+            }
+        }
+        stage('Flake8'){
+            steps{
+                catchError(buildResult:'UNSTABLE',stageResult:'FAILURE'){
+                    sh ''' 
+                        pip install flake8 
+                        python3 -m flake8 --exit-zero --ignore=F401,E265,W293,E225,E226,E121,E211,E501,E301,W292 --max-line-length=110 --format=pylint test/integration/todoApiTest.py
+                    '''
+                }
+            }
+        }
+        stage('Promote'){
+            steps{
+                script {
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        withCredentials([usernamePassword(credentialsId: 'git-credentials', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                            def encodedPassword = URLEncoder.encode("$GIT_PASSWORD",'UTF-8')
+                            sh "git config user.email froquetrinidad@gmail.com"
+                            sh "git config user.name Frandys Roque"
+                            sh "git status"
+                            sh "git add -A"
+                            sh 'git commit -m "CI COMPLETED"'
+                            sh "git status"
+                            sh "git checkout master"
+                            sh 'git merge develop -m "Promoting changes from develop to master"'
+                            sh "git push https://${GIT_USERNAME}:${encodedPassword}@github.com/${GIT_USERNAME}/${GIT_URL}"
+                        }
+                    }
+                }
+            }   
+        }
+    }
+}

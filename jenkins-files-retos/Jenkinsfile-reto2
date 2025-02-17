@@ -1,0 +1,72 @@
+pipeline {
+    agent any
+
+     environment {
+        BUCKET_S3 = "aws-sam-cli-managed-production-samclisourcebucket-froque"
+        GIT_CREDENTIALS = 'git-credentials' //  ID de las credenciales configuradas
+        GIT_URL = 'todo-list-aws.git' //nombre repositorio git para url
+    }
+    stages {
+        stage('GetCode') {
+            steps {
+                script{
+                    git branch:'master',
+                    url:'https://github.com/FrxndysRxxqux/todo-list-aws.git'
+                }
+            }
+        }
+        stage('Deploy'){
+            steps{
+            sh """
+                # Ejecutar el comando sam build
+                sam build
+
+                # Modificar samconfig.toml
+                sed -i 's/resolve_s3 = true/resolve_s3 = false/' samconfig.toml
+            
+                # Permitir que sam deploy falle si la pila ya existe
+                set +e
+                sam deploy --stack-name todo-list-aws-production \
+                           --region us-east-1 \
+                           --s3-bucket $BUCKET_S3 \
+                           --s3-prefix todo-list-aws \
+                           --no-confirm-changeset
+                set -e
+
+                # Usar cada valor del array como parámetro
+                aws cloudformation describe-stacks --stack-name "todo-list-aws-production" --query 'Stacks[0].Outputs' --output json > outputs1-production.json
+            """
+            }
+        }
+        stage('Test Rest') {
+            steps {
+                script{
+                    sh '''
+                        #obtenemos los valores del output creado para hacer los curl test
+                        
+                        ListTodosApi=$(jq -r '.[] | select(.OutputKey=="ListTodosApi") | .OutputValue' outputs1-production.json)
+                        CreateTodoApi=$(jq -r '.[] | select(.OutputKey=="CreateTodoApi") | .OutputValue' outputs1-production.json)
+                        GetTodoApi=$(jq -r '.[] | select(.OutputKey=="GetTodoApi") | .OutputValue' outputs1-production.json)
+                        UpdateTodoApi=$(jq -r '.[] | select(.OutputKey=="UpdateTodoApi") | .OutputValue' outputs1-production.json)
+                        DeleteTodoApi=$(jq -r '.[] | select(.OutputKey=="DeleteTodoApi") | .OutputValue' outputs1-production.json)
+                        
+                        #solo hacemos test a un listar, ya que no podemos hacer test a pruebas de escritura, y como no tenemos elementos en la lista, pues no podemos motrar ni obtener uno por id
+                        
+                        echo "Validando LIST TODO API..."
+                            RESPONSE=$(curl -s "$ListTodosApi" -w "\n%{http_code}")
+                            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                            JSON_RESPONSE=$(echo "$RESPONSE" | sed '$d')
+                            
+                            if [ "$HTTP_CODE" -ne 200 ]; then
+                                echo "ERROR: LIST TODO API fallo con codigo $HTTP_CODE"
+                                echo "Respuesta completa: $JSON_RESPONSE"
+                                exit 1
+                            fi
+                            
+                    '''
+                }
+            }
+        }
+
+    }
+}

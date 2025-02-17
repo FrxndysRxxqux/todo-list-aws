@@ -1,0 +1,205 @@
+pipeline {
+    agent any
+    environment {
+        GIT_CREDENTIALS = 'git-credentials' //  ID de las credenciales configuradas
+        GIT_URL = 'todo-list-aws.git' //nombre repositorio git para url
+    }
+    stages {
+        stage('GetCode') {
+            agent { label 'built-in' }
+            steps {
+                git credentialsId: 'git-credentials', // id de la credencial en jenkins
+                branch:'develop',
+                url:'https://github.com/FrxndysRxxqux/todo-list-aws.git'
+                stash name:'code',includes: '**'
+                
+                sh """ 
+                    echo "Mostrando informacion local..."
+                    whoami
+                    hostname 
+                """
+            }
+        }
+        stage('Static test'){
+            parallel{
+                stage('Flake8'){
+                    agent {label 'linux-agent-1'}
+                    steps{
+                        catchError(buildResult:'UNSTABLE',stageResult:'FAILURE'){
+                            unstash name: 'code'
+                            sh ''' 
+                                echo "Mostrando informacion local..."
+                                    whoami
+                                    hostname 
+                                pip install flake8 
+                                python3 -m flake8 --exit-zero --ignore=F401,E265,W293,E225,E226,E121,E211,E501,E301,W292 --max-line-length=110 --format=pylint test/integration/todoApiTest.py
+                            '''
+                        }
+                    }
+                }
+                stage('Bandit'){
+                    agent {label 'linux-agent-1'}
+                    steps{
+                        unstash name: 'code'
+                        sh '''
+                            echo "Mostrando informacion local..."
+                                whoami
+                                hostname 
+                            pip install bandit
+                            python3 -m bandit --exit-zero -r . -f custom -o bandit.out --msg-template "{abspath}:{line}:{severity}:{test_id}:{msg}"
+                        '''
+                        stash name: 'stash_bandit', includes: 'bandit.out'
+                    }
+                }
+            }
+        }
+        stage('Sam Deploy'){
+            agent {label 'linux-agent-2'}
+            steps {
+                script{
+                    unstash name: 'code'
+                    sh """
+                        echo "Mostrando informacion local..."
+                            whoami
+                            hostname 
+                    
+                        # Ejecutar el comando sam build
+                        sam build
+
+                        # Modificar samconfig.toml eliminando el nombre del bucket
+                        sed -i 's/^s3_bucket = .*//' samconfig.toml
+
+                        # Permitir que sam deploy falle sin interrumpir el pipeline
+                        
+                        sam deploy --stack-name todo-list-aws \
+                           --region us-east-1 \
+                           --s3-prefix todo-list-aws \
+                           --no-confirm-changeset \
+                           --no-fail-on-empty-changeset \
+                           --capabilities CAPABILITY_IAM \
+
+                        # Usar cada valor del array como parámetro
+                        aws cloudformation describe-stacks --stack-name "todo-list-aws" --query 'Stacks[0].Outputs' --output json > outputs1.json
+                    """
+                    //stashamos el outpust de aws para almacenar el url a la que haremos curl
+                    stash name:'api_url_tests',includes: 'outputs1.json'
+                    
+                }
+            }
+        }
+        stage('Test Rest') {
+            agent {label 'linux-agent-2'}
+            steps {
+                script{
+                    // Exportarlas como variables de entorno
+                    unstash name: 'api_url_tests'
+                    sh '''
+                        echo "Mostrando informacion local..."
+                            whoami
+                            hostname 
+                            
+                        sudo apt install jq -y #herramienta de línea de comandos para procesar JSON en Linux
+
+                        ListTodosApi=$(jq -r '.[] | select(.OutputKey=="ListTodosApi") | .OutputValue' outputs1.json)
+                        CreateTodoApi=$(jq -r '.[] | select(.OutputKey=="CreateTodoApi") | .OutputValue' outputs1.json)
+                        GetTodoApi=$(jq -r '.[] | select(.OutputKey=="GetTodoApi") | .OutputValue' outputs1.json)
+                        UpdateTodoApi=$(jq -r '.[] | select(.OutputKey=="UpdateTodoApi") | .OutputValue' outputs1.json)
+                        DeleteTodoApi=$(jq -r '.[] | select(.OutputKey=="DeleteTodoApi") | .OutputValue' outputs1.json)
+                        
+                        echo "Validando LIST TODO API..."
+                            RESPONSE=$(curl -s "$ListTodosApi" -w "\n%{http_code}")
+                            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                            JSON_RESPONSE=$(echo "$RESPONSE" | sed '$d')
+                            
+                            if [ "$HTTP_CODE" -ne 200 ]; then
+                                echo "ERROR: LIST TODO API fallo con codigo $HTTP_CODE"
+                                echo "Respuesta completa: $JSON_RESPONSE"
+                                exit 1
+                            fi
+                            
+                            
+                        echo "Validando CREATE TODO API..."
+                            RESPONSE=$(curl -s -X POST -d '{"text": "Learning CD"}' "$CreateTodoApi" -w "\n%{http_code}")
+                            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                            JSON_RESPONSE=$(echo "$RESPONSE" | sed '$d')
+                            
+                            if [ "$HTTP_CODE" -ne 200 ]; then
+                                echo "ERROR: LIST TODO API fallo $RESPONSE"
+                                exit 1
+                            fi
+                            
+                            #almacenar id para el get/id
+                            TODO_ID=$(echo "$JSON_RESPONSE" | jq -r '.body | fromjson | .id')
+                            
+                        echo "Validando GET TODO API..."
+                            # RESPONSE=$(curl -s -w "%{http_code}" "$GetTodoApi")
+                            RESPONSE=$(curl -s -w "%{http_code}" "$(echo "$GetTodoApi" | sed "s/{id}/$TODO_ID/")")
+                            
+                            if [ "$RESPONSE" -ne 200 ]; then
+                                echo "ERROR: GET TODO API fallo $RESPONSE"
+                                exit 1
+                            fi
+                        
+                        echo "Validando UPDATE TODO API..."
+                            RESPONSE=$(curl -X PUT $(echo "$UpdateTodoApi" | sed "s/{id}/$TODO_ID/") --data '{"text": "Learning CI/CD","checked": true}'  -w "\n%{http_code}")
+                            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                            JSON_RESPONSE=$(echo "$RESPONSE" | sed '$d')
+                            
+                            echo "Respuesta: $JSON_RESPONSE"
+    
+                            # Verificar si la solicitud fue exitosa
+                            if [ "$HTTP_CODE" -ne 200 ]; then
+                                echo "ERROR: UPDATE TODO API fallo $RESPONSE"
+                                exit 1
+                            fi
+                            
+                        echo "Validando DELETE TODO API..."
+                        
+                            RESPONSE=$(curl -X DELETE $(echo "$DeleteTodoApi" | sed "s/{id}/$TODO_ID/")  -w "\n%{http_code}")
+                            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                            JSON_RESPONSE=$(echo "$RESPONSE" | sed '$d')
+                            
+                            echo "Respuesta: $JSON_RESPONSE"
+    
+                            if [ "$HTTP_CODE" -ne 200 ]; then
+                                echo "ERROR: DELETE TODO API fallo con codigo $RESPONSE"
+                                exit 1
+                            fi
+                    '''
+                }
+                
+            }
+        }
+        stage('Promote'){
+            agent { label 'built-in' }
+            steps{
+                script {
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        withCredentials([usernamePassword(credentialsId: 'git-credentials', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                            unstash name: 'code'
+                            unstash name: 'stash_bandit'
+                            unstash name: 'api_url_tests'
+
+                            def encodedPassword = URLEncoder.encode("$GIT_PASSWORD",'UTF-8')
+                            sh """
+                            echo "Mostrando informacion local..."
+                                whoami
+                                hostname 
+                            """
+                            sh "git config user.email froquetrinidad@gmail.com"
+                            sh "git config user.name Frandys Roque"
+                            sh "git status"
+                            sh "git add -A"
+                            // sh "git reset bandit.out outputs1.json" //ignoramos archivos creados que no son neceasrios en prod
+                            sh 'git commit --no-verify -m "CI COMPLETED" ' 
+                            sh "git status"
+                            sh "git checkout master"
+                            sh 'git merge develop -m "Promoting changes from develop to master"'
+                            sh "git push https://${GIT_USERNAME}:${encodedPassword}@github.com/${GIT_USERNAME}/${GIT_URL}"
+                        }
+                    }
+                }
+            }   
+        }
+    }
+}
